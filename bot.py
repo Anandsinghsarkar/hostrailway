@@ -768,6 +768,18 @@ _PHOTO_ICONS: Dict[str, str] = {
 }
 
 
+_PHOTO_ASCII_MAP = str.maketrans({
+    "ᴀ":"A", "ʙ":"B", "ᴄ":"C", "ᴅ":"D", "ᴇ":"E", "ꜰ":"F",
+    "ɢ":"G", "ʜ":"H", "ɪ":"I", "ᴊ":"J", "ᴋ":"K", "ʟ":"L",
+    "ᴍ":"M", "ɴ":"N", "ᴏ":"O", "ᴘ":"P", "ǫ":"Q", "ʀ":"R",
+    "ꜱ":"S", "ᴛ":"T", "ᴜ":"U", "ᴠ":"V", "ᴡ":"W", "ʏ":"Y",
+    "ᴢ":"Z",
+})
+
+def _photo_text(s: str) -> str:
+    return str(s).translate(_PHOTO_ASCII_MAP)
+
+
 def _build_local_photos() -> None:
     """Render every banner once into storage/photos/<key>.png. Safe to
     call repeatedly — existing files are reused. Falls back gracefully
@@ -802,6 +814,8 @@ def _build_local_photos() -> None:
         return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
     for key, (text, color, sub) in _PHOTO_SPECS.items():
+        text = _photo_text(text)
+        sub = _photo_text(sub)
         # ── Custom admin-uploaded photo takes priority over generated one ──
         # replace_menu_photo() always writes custom_<key>.png as the
         # persistent marker, so this survives restarts and GitHub restores.
@@ -809,7 +823,7 @@ def _build_local_photos() -> None:
         if custom_out.exists() and custom_out.stat().st_size > 1024:
             PHOTOS[key] = str(custom_out)
             continue
-        out = out_dir / f"{key}.png"
+        out = out_dir / f"v2_{key}.png"
         if out.exists() and out.stat().st_size > 1024:
             PHOTOS[key] = str(out)
             continue
@@ -14074,12 +14088,18 @@ def _monitor_system_stats():
     return stats
 
 
-def _progress_bar(current, total, width=12):
-    if total <= 0:
-        return "░" * width + " 0%"
-    pct    = min(current / total, 1.0)
-    filled = int(pct * width)
-    return "█" * filled + "░" * (width - filled) + f" {pct*100:.1f}%"
+def _progress_bar(current, total=None, width=12):
+    # Supports both `_progress_bar(percent)` and
+    # `_progress_bar(current, total)` because this helper was historically
+    # defined twice in the large bot file.
+    if total is None:
+        pct = max(0.0, min(100.0, float(current)))
+    elif total <= 0:
+        pct = 0.0
+    else:
+        pct = max(0.0, min(100.0, (float(current) / float(total)) * 100.0))
+    filled = int(round(width * pct / 100.0))
+    return "█" * filled + "░" * (width - filled) + f" {pct:.1f}%"
 
 
 def _run_diagnostics():
@@ -14087,7 +14107,7 @@ def _run_diagnostics():
     report = {
         "bot_token":      bool(os.environ.get("BOT_TOKEN")),
         "db_writable":    DB_FILE.parent.exists() and os.access(str(DB_FILE.parent), os.W_OK),
-        "sandbox_exists": DIRS.get("sandboxes", BASE_DIR/"sandboxes").exists(),
+        "sandbox_exists": DIRS.get("sandbox", BASE_DIR/"sandbox").exists(),
         "python_found":   bool(shutil.which("python3")),
         "owner_set":      OWNER_ID > 0,
         "threads_running":threading.active_count() > 3,
