@@ -57,19 +57,16 @@ jobs:
           '''
 
           payment_screen = '''def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
-              plan = data.split('_', 2)[2] if len(data.split('_', 2)) >= 3 else None
-              render_payment_methods_for(call, plan or 'free')
+              parts = data.split('_', 2)
+              plan = parts[2] if len(parts) >= 3 else 'free'
+              render_payment_methods_for(call, plan)
           '''
 
           proof = '''def start_proof_flow(call: types.CallbackQuery) -> None:
               if OWNER_ID:
-                  bot.send_message(
-                      call.message.chat.id,
-                      f"👤 {sc('For payment, please contact the owner directly.')}",
-                      reply_markup=types.InlineKeyboardMarkup().add(
-                          Btn(f"👤  {sc('Contact Owner')}", url=f"tg://user?id={OWNER_ID}")
-                      ),
-                  )
+                  kb = types.InlineKeyboardMarkup()
+                  kb.add(Btn(f"👤  {sc('Contact Owner')}", url=f"tg://user?id={OWNER_ID}"))
+                  bot.send_message(call.message.chat.id, sc('For payment, please contact the owner directly.'), reply_markup=kb)
               else:
                   bot.send_message(call.message.chat.id, sc('Please contact the owner for payment instructions.'))
           '''
