@@ -1,0 +1,84 @@
+name: Repair bot runtime
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch bot.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("bot.py")
+          s = p.read_text(encoding="utf-8")
+
+          # Fix the duplicate progress-bar definition. The later definition
+          # used to require `total`, while earlier callers pass only `pct`.
+          old = '''def _progress_bar(current, total, width=12):\n    if total <= 0:\n        return "░" * width + " 0%"\n    pct    = min(current / total, 1.0)\n    filled = int(pct * width)\n    return "█" * filled + "░" * (width - filled) + f" {pct*100:.1f}%"'''
+          new = '''def _progress_bar(current, total=None, width=12):\n    # Supports both `_progress_bar(percent)` and\n    # `_progress_bar(current, total)` because this helper was historically\n    # defined twice in the large bot file.\n    if total is None:\n        pct = max(0.0, min(100.0, float(current)))\n    elif total <= 0:\n        pct = 0.0\n    else:\n        pct = max(0.0, min(100.0, (float(current) / float(total)) * 100.0))\n    filled = int(round(width * pct / 100.0))\n    return "█" * filled + "░" * (width - filled) + f" {pct:.1f}%"'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif "def _progress_bar(current, total, width=12):" in s:
+              pattern = re.compile(r'def _progress_bar\(current, total, width=12\):\n(?:    .*\n){1,6}')
+              s, n = pattern.subn(new + "\n", s, count=1)
+              if not n:
+                  raise SystemExit("Could not patch duplicate _progress_bar")
+          else:
+              print("progress-bar already patched")
+
+          # DejaVu Sans does not contain the small-cap Unicode letters used
+          # by the banner labels (e.g. Mᴀɪɴ Mᴇɴᴜ), which produces square/tofu
+          # glyphs in generated PNGs. Translate those decorative glyphs to
+          # ordinary ASCII before Pillow renders the text.
+          marker = 'def _photo_text(s: str) -> str:'
+          if marker not in s:
+              anchor = 'def _build_local_photos() -> None:\n'
+              helper = '''_PHOTO_ASCII_MAP = str.maketrans({\n    "ᴀ":"A", "ʙ":"B", "ᴄ":"C", "ᴅ":"D", "ᴇ":"E", "ꜰ":"F",\n    "ɢ":"G", "ʜ":"H", "ɪ":"I", "ᴊ":"J", "ᴋ":"K", "ʟ":"L",\n    "ᴍ":"M", "ɴ":"N", "ᴏ":"O", "ᴘ":"P", "ǫ":"Q", "ʀ":"R",\n    "ꜱ":"S", "ᴛ":"T", "ᴜ":"U", "ᴠ":"V", "ᴡ":"W", "ʏ":"Y",\n    "ᴢ":"Z",\n})\n\ndef _photo_text(s: str) -> str:\n    return str(s).translate(_PHOTO_ASCII_MAP)\n\n\n'''
+              if anchor not in s:
+                  raise SystemExit("Photo builder anchor not found")
+              s = s.replace(anchor, helper + anchor, 1)
+
+          # Apply safe text conversion and force a new generated-image name so
+          # old broken PNGs are not reused from storage/photos.
+          target = '    for key, (text, color, sub) in _PHOTO_SPECS.items():\n'
+          replacement = target + '        text = _photo_text(text)\n        sub = _photo_text(sub)\n'
+          if target in s and replacement not in s:
+              s = s.replace(target, replacement, 1)
+          s = s.replace('        out = out_dir / f"{key}.png"\n',
+                        '        out = out_dir / f"v2_{key}.png"\n', 1)
+
+          # Diagnostics used the wrong plural key; the real directory key is
+          # `sandbox`.
+          s = s.replace('DIRS.get("sandboxes", BASE_DIR/"sandboxes")',
+                        'DIRS.get("sandbox", BASE_DIR/"sandbox")')
+
+          p.write_text(s, encoding="utf-8")
+          print("bot.py repaired")
+          PY
+
+      - name: Verify syntax
+        run: python -m py_compile bot.py
+
+      - name: Commit repaired bot.py
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Fix progress bar and generated banner rendering"
+            git push
+          fi
