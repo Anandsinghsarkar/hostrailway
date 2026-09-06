@@ -1,0 +1,93 @@
+name: Replace payments with owner contact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bot.py'
+      - '.github/workflows/owner_contact_payment.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Replace user payment flow
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          p = Path('bot.py')
+          s = p.read_text(encoding='utf-8')
+
+          def replace_def(src, name, replacement):
+              pattern = rf'^def {re.escape(name)}\(.*?(?=^def |\Z)'
+              out, n = re.subn(pattern, replacement.rstrip() + '\n\n', src, flags=re.M | re.S)
+              if n != 1:
+                  raise SystemExit(f'{name}: expected 1 definition, found {n}')
+              return out
+
+          payment = '''def render_payment_methods_for(call: types.CallbackQuery, plan: str) -> None:
+              p = PLAN_LIMITS.get(plan)
+              if not p:
+                  ack(call, "Unknown plan"); return
+              cap = (
+                  f"<b>👤 {sc('Contact Owner')}</b>\\n"
+                  f"{G['div_eq']}\\n"
+                  f"{bullet('Plan', p['name'])}\\n"
+                  f"{bullet('Price', 'Free' if p['price'] == 0 else '{}$'.format(p['price']))}\\n"
+                  f"{G['div']}\\n"
+                  f"{sc('To purchase this plan, contact the owner directly.')}\\n"
+                  f"{sc('The owner will provide payment instructions and activate your plan after confirmation.')}\\n"
+                  f"{G['div']}{FOOTER}"
+              )
+              kb = types.InlineKeyboardMarkup()
+              if OWNER_ID:
+                  kb.add(Btn(f"👤  {sc('Contact Owner')}", url=f"tg://user?id={OWNER_ID}"))
+              else:
+                  kb.add(Btn(f"👤  {sc('Contact Owner')}", callback_data="menu_support"))
+              kb.add(Btn(f"{G['back']}  {sc('Plan')}", callback_data=f"plan_detail_{plan}"))
+              show_menu(call.message.chat.id, PHOTOS.get("pay", PHOTOS["wallet"]), cap, kb, call=call)
+          '''
+
+          payment_screen = '''def render_payment_screen(call: types.CallbackQuery, data: str) -> None:
+              plan = data.split('_', 2)[2] if len(data.split('_', 2)) >= 3 else None
+              render_payment_methods_for(call, plan or 'free')
+          '''
+
+          proof = '''def start_proof_flow(call: types.CallbackQuery) -> None:
+              if OWNER_ID:
+                  bot.send_message(
+                      call.message.chat.id,
+                      f"👤 {sc('For payment, please contact the owner directly.')}",
+                      reply_markup=types.InlineKeyboardMarkup().add(
+                          Btn(f"👤  {sc('Contact Owner')}", url=f"tg://user?id={OWNER_ID}")
+                      ),
+                  )
+              else:
+                  bot.send_message(call.message.chat.id, sc('Please contact the owner for payment instructions.'))
+          '''
+
+          s = replace_def(s, 'render_payment_methods_for', payment)
+          s = replace_def(s, 'render_payment_screen', payment_screen)
+          s = replace_def(s, 'start_proof_flow', proof)
+          p.write_text(s, encoding='utf-8')
+
+      - name: Validate syntax
+        run: python -m py_compile bot.py
+
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Replace payment flow with owner contact [skip ci]'
+          git push
