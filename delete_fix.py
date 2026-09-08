@@ -1,18 +1,15 @@
 """Railway-safe delete handler for uploaded Telegram files/messages.
 
-Loaded by Procfile before bot.py so the handler is installed before the bot's
-other callback handlers. It supports common callback formats such as
- delete:<filename>, delete|<filename>, del:<filename> and plain delete buttons.
-Only files inside known upload/storage directories are ever removed.
+This launcher patches TeleBot before executing bot.py, so existing bot logic
+stays intact while delete callbacks get a reliable first-pass handler.
 """
 from __future__ import annotations
 
 import os
+import runpy
 import stat
-import threading
 from pathlib import Path
 from urllib.parse import unquote
-
 
 SAFE_ROOT_NAMES = {
     "uploads", "upload", "uploaded", "uploaded_files", "files",
@@ -27,14 +24,12 @@ def _safe_roots() -> list[Path]:
         p = (base / name).resolve()
         if p.exists() and p.is_dir():
             roots.append(p)
-    # Also support explicit upload directory supplied by the app.
     for env_name in ("UPLOAD_DIR", "UPLOAD_FOLDER", "STORAGE_DIR", "FILES_DIR"):
         value = os.environ.get(env_name)
         if value:
             p = Path(value).expanduser().resolve()
             if p.exists() and p.is_dir():
                 roots.append(p)
-    # Common nested data/uploads layout.
     p = (base / "data" / "uploads").resolve()
     if p.exists() and p.is_dir():
         roots.append(p)
@@ -50,20 +45,21 @@ def _inside_safe_root(path: Path) -> bool:
 
 
 def _delete_path(value: str) -> bool:
-    """Delete a callback-supplied file path/name, never outside safe roots."""
+    """Delete only a callback-supplied file inside an allowed storage root."""
     if not value:
         return False
     value = unquote(value).strip().strip("\"'")
-    if not value or value in {"delete", "del", "remove", "none", "null"}:
+    if not value or value.lower() in {"delete", "del", "remove", "none", "null"}:
         return False
 
-    candidates: list[Path] = []
     raw = Path(value).expanduser()
+    candidates: list[Path] = []
     if raw.is_absolute():
-        candidates.append(raw)
+        candidates.append(raw.resolve())
     else:
         for root in _safe_roots():
             candidates.append((root / value).resolve())
+            # Also support callbacks that send only the stored filename.
             candidates.append((root / raw.name).resolve())
 
     for path in candidates:
@@ -84,11 +80,12 @@ def _delete_path(value: str) -> bool:
 def _extract_target(data: str) -> str:
     data = (data or "").strip()
     low = data.lower()
-    # Prefer the payload after the first separator.
     for sep in (":", "|", "="):
         if sep in data:
             head, tail = data.split(sep, 1)
-            if head.lower().strip() in {"delete", "del", "remove", "rm", "delete_file", "deletefile"}:
+            if head.lower().strip() in {
+                "delete", "del", "remove", "rm", "delete_file", "deletefile"
+            }:
                 return tail
     for prefix in ("delete_", "del_", "remove_"):
         if low.startswith(prefix):
@@ -99,47 +96,47 @@ def _extract_target(data: str) -> str:
 def _install_on_bot_class() -> None:
     try:
         from telebot import TeleBot
-        from telebot import types
-    except Exception:
+    except Exception as exc:
+        print(f"[delete-fix] telebot import failed: {exc}")
+        return
+
+    if getattr(TeleBot, "_hostrailway_delete_fix", False):
         return
 
     original_init = TeleBot.__init__
-    if getattr(TeleBot, "_hostrailway_delete_fix", False):
-        return
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
 
         def delete_callback(call):
             data = getattr(call, "data", "") or ""
-            target = _extract_target(data)
-            removed = _delete_path(target)
+            removed = _delete_path(_extract_target(data))
 
-            # Delete the Telegram message that contains the file/delete button.
+            # Remove the Telegram message containing the uploaded file/button.
             try:
                 msg = getattr(call, "message", None)
                 if msg is not None:
                     self.delete_message(msg.chat.id, msg.message_id)
             except Exception:
                 pass
+
             try:
                 self.answer_callback_query(
                     call.id,
-                    "🗑️ File/message deleted" if removed else "🗑️ Delete done",
+                    "🗑️ File deleted" if removed else "🗑️ Delete done",
                     show_alert=False,
                 )
             except Exception:
                 pass
 
         try:
-            # Registered immediately after TeleBot construction, before bot.py
-            # registers its own callback handlers, so delete callbacks get first
-            # chance to run.
+            # Installed immediately after construction, before bot.py adds its
+            # own callback handlers, giving this handler priority.
             self.register_callback_query_handler(
                 delete_callback,
                 func=lambda call: any(
-                    x in ((getattr(call, "data", "") or "").lower())
-                    for x in ("delete", "del:", "del_", "remove")
+                    token in ((getattr(call, "data", "") or "").lower())
+                    for token in ("delete", "del:", "del_", "remove")
                 ),
             )
         except Exception as exc:
@@ -151,6 +148,5 @@ def _install_on_bot_class() -> None:
 
 _install_on_bot_class()
 
-# Start the original bot. Importing executes bot.py exactly as before, while
-# the patched TeleBot class installs the delete handler first.
-import bot  # noqa: F401,E402
+# Execute bot.py exactly as if Railway had launched `python bot.py`.
+runpy.run_path(str(Path(__file__).with_name("bot.py")), run_name="__main__")
